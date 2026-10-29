@@ -514,5 +514,89 @@ class TestSewaSetuMCPServers(unittest.TestCase):
         conn.close()
 
 
+    def test_12_audience_and_expiry_validation(self):
+        """Verify that tokens with mismatched audience or expired signatures are rejected."""
+        # 1. Mismatched audience
+        token_bad_aud, _ = portal_oauth.mint_access_token(
+            subject="citizen:9990001001",
+            role="citizen",
+            scope="citizen",
+            audience="https://attacker-domain.evil.com",
+            client_id="test-client",
+            ttl=3600
+        )
+        res_aud = requests.post(
+            f"{BASE_URL}/mcp/citizen",
+            headers={"Authorization": f"Bearer {token_bad_aud}", "Content-Type": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "test-aud-1",
+                "method": "tools/call",
+                "params": {"name": "get_my_application_status", "arguments": {}}
+            }
+        )
+        self.assertEqual(res_aud.status_code, 401)
+        self.assertIn("audience mismatch", res_aud.json()["error"]["message"])
+
+        # 2. Expired token (ttl = -10)
+        token_expired, _ = portal_oauth.mint_access_token(
+            subject="citizen:9990001001",
+            role="citizen",
+            scope="citizen",
+            audience=portal_oauth.ISSUER,
+            client_id="test-client",
+            ttl=-10
+        )
+        res_exp = requests.post(
+            f"{BASE_URL}/mcp/citizen",
+            headers={"Authorization": f"Bearer {token_expired}", "Content-Type": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "test-exp-1",
+                "method": "tools/call",
+                "params": {"name": "get_my_application_status", "arguments": {}}
+            }
+        )
+        self.assertEqual(res_exp.status_code, 401)
+        self.assertIn("expired", res_exp.json()["error"]["message"])
+
+    def test_13_gateway_security(self):
+        """Verify that public unauthenticated requests cannot retrieve OTPs or message queues."""
+        # Simulate public external request via X-Forwarded-For header
+        public_headers = {"X-Forwarded-For": "203.0.113.195"}
+
+        # 1. Unauthenticated public request to gateway console must be rejected (401)
+        res_console = requests.get(f"{BASE_URL}/__gateway/", headers=public_headers)
+        self.assertEqual(res_console.status_code, 401)
+
+        # 2. Unauthenticated public request to /api/messages must be rejected (401)
+        res_msgs = requests.get(f"{BASE_URL}/__gateway/api/messages", headers=public_headers)
+        self.assertEqual(res_msgs.status_code, 401)
+
+        # 3. Citizen with valid Bearer token for 9990001001 cannot query someone else's OTP
+        citizen_token = get_token("citizen:9990001001", "citizen", "citizen")
+        res_other = requests.get(
+            f"{BASE_URL}/__gateway/api/messages?to=9990001002",
+            headers={"Authorization": f"Bearer {citizen_token}", **public_headers}
+        )
+        self.assertEqual(res_other.status_code, 403)
+
+        # 4. Citizen with valid Bearer token CAN query their own messages
+        res_own = requests.get(
+            f"{BASE_URL}/__gateway/api/messages?to=9990001001",
+            headers={"Authorization": f"Bearer {citizen_token}", **public_headers}
+        )
+        self.assertEqual(res_own.status_code, 200)
+
+        # 5. Officer token has full access to inspect gateway messages
+        officer_token = get_token("officer:admin", "officer", "officer")
+        res_officer = requests.get(
+            f"{BASE_URL}/__gateway/api/messages",
+            headers={"Authorization": f"Bearer {officer_token}", **public_headers}
+        )
+        self.assertEqual(res_officer.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

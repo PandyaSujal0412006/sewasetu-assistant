@@ -228,12 +228,73 @@ def about():
     return render_template("about.html")
 
 
+def _is_gateway_authorized(subpath):
+    """
+    Security check: Ensure public unauthenticated requests cannot retrieve OTPs,
+    message queues, or personal information, while preserving required local test functionality.
+    """
+    # 1. Admin session has full access
+    if session.get("admin"):
+        return True, None
+
+    # 2. Check Bearer token if provided
+    auth_header = request.headers.get("Authorization", "")
+    token_subject = None
+    token_role = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        try:
+            import oauth as portal_oauth
+            claims = portal_oauth.verify_token(token, audience=portal_oauth.ISSUER)
+            if claims:
+                token_subject = claims.get("sub", "")
+                token_role = claims.get("role", "")
+                if token_role == "officer":
+                    return True, None
+        except Exception:
+            pass
+
+    # 3. Check citizen session / token identity
+    citizen_mobile = None
+    if token_role == "citizen" and token_subject and token_subject.startswith("citizen:"):
+        citizen_mobile = token_subject.split(":", 1)[1]
+    else:
+        citizen_mobile = session.get("apply_mobile") or session.get("verified_mobile") or session.get("portal_mobile")
+
+    # Citizen is restricted to /api/messages for their own mobile number only
+    if citizen_mobile:
+        norm_subpath = subpath.strip("/")
+        if norm_subpath == "api/messages":
+            target_to = request.args.get("to", "").strip()
+            if target_to == citizen_mobile:
+                return True, None
+            return False, ("Forbidden: Citizens may only view OTP messages sent to their own registered mobile.", 403)
+        return False, ("Forbidden: Citizen session cannot view gateway console or full message queue.", 403)
+
+    # 4. Check if request is local (internal/loopback development & testing)
+    public_url = os.environ.get("PUBLIC_BASE_URL", "")
+    is_public_deployment = bool(public_url and not any(h in public_url for h in ("localhost", "127.0.0.1", "0.0.0.0")))
+    
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    if client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+    is_loopback = client_ip in ("127.0.0.1", "::1", "localhost")
+
+    if not is_public_deployment and is_loopback:
+        # Local test environment: allow access
+        return True, None
+
+    return False, ("Unauthorized: Public unauthenticated requests cannot access gateway messages or OTPs.", 401)
+
+
 @app.route("/__gateway/", defaults={"subpath": ""})
 @app.route("/__gateway/<path:subpath>")
 def gateway_proxy(subpath):
-    # Convenience proxy to the internal SMS gateway, so the OTP inbox is reachable
-    # on the main site without opening a second port on the host. The gateway
-    # itself runs only on the internal network.
+    # Convenience proxy to internal SMS gateway, protected against unauthenticated public access
+    allowed, err_resp = _is_gateway_authorized(subpath)
+    if not allowed:
+        return err_resp
+
     try:
         r = requests.get(SMS_GATEWAY_URL + "/" + subpath,
                          params=request.args, timeout=5)

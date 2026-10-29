@@ -61,17 +61,25 @@ def verify_mcp_token(token: str, required_role: str, required_scope: str) -> Tup
     try:
         kid, priv = portal_oauth.signing_key()
         # Decode using public key; verify signature and issuer
+        valid_audiences = [
+            portal_oauth.ISSUER,
+            f"{portal_oauth.ISSUER}/mcp/{required_role}",
+            f"{portal_oauth.ISSUER}/mcp",
+        ]
+        valid_audiences = list(dict.fromkeys(valid_audiences))
         claims = jwt.decode(
             token,
             priv.public_key(),
             algorithms=["RS256"],
             issuer=portal_oauth.ISSUER,
-            options={"verify_aud": False}  # audience checked below
+            audience=valid_audiences,
         )
     except jwt.ExpiredSignatureError:
         return False, None, "Token has expired. Please sign in again."
     except jwt.InvalidIssuerError:
         return False, None, "Token issuer mismatch."
+    except jwt.InvalidAudienceError:
+        return False, None, "Token audience mismatch or unauthorized resource."
     except jwt.PyJWTError as e:
         return False, None, "Invalid token signature or format."
 

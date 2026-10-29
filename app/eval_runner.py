@@ -20,6 +20,7 @@ import os
 import re
 import json
 import time
+import uuid
 import copy
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Tuple, Optional
@@ -1200,7 +1201,7 @@ def run_all_evaluations() -> Dict[str, Any]:
     ensure_eval_tables()
     clean_test_fixtures()
 
-    run_id = f"eval_{int(time.time())}"
+    run_id = f"eval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     timestamp = datetime.now()
     results = []
 
